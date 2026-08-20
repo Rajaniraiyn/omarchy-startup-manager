@@ -44,6 +44,14 @@ class StartupCtlTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertIn("Protected unit", payload["error"])
 
+    def test_dbus_broker_is_protected(self):
+        result, payload = self.invoke(
+            "action", "--scope", "user", "--unit", "dbus-broker.service", "--action", "stop"
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(payload["ok"])
+        self.assertIn("Desktop message bus", payload["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -33,14 +33,13 @@ PROTECTED_USER_EXACT = {
     "xdg-desktop-autostart.target": "Desktop startup target",
 }
 PROTECTED_USER_PREFIXES = {
+    "dbus": "Desktop message bus",
     "gnome-keyring-": "Credential storage",
+    "omarchy-": "Omarchy desktop integration",
     "xdg-desktop-portal": "Desktop portal",
+    "xdg-document-portal": "Desktop document portal",
+    "xdg-permission-store": "Desktop permission store",
     "uwsm": "Wayland session manager",
-    "omarchy-crash-watch": "Omarchy recovery service",
-    "omarchy-migrate": "Omarchy migration service",
-    "omarchy-recover": "Omarchy recovery service",
-    "omarchy-sleep-lock": "Omarchy lock integration",
-    "omarchy-shell": "Omarchy desktop shell",
 }
 PROTECTED_SYSTEM_EXACT = {
     "NetworkManager.service": "Network connectivity",
@@ -54,11 +53,16 @@ PROTECTED_SYSTEM_EXACT = {
     "ufw.service": "Firewall",
 }
 PROTECTED_SYSTEM_PREFIXES = {
+    "NetworkManager": "Network connectivity",
     "systemd-": "Core operating-system service",
     "dbus": "System message bus",
     "getty@": "Login console",
+    "intel_lpmd": "Intel power and thermal management",
+    "limine-": "Boot and snapshot integration",
+    "power-profiles-daemon": "Power profile management",
     "user@": "User session manager",
     "polkit": "Privilege authorization",
+    "snapper-": "Filesystem snapshot maintenance",
 }
 PROTECTED_AUTOSTART_PREFIXES = {
     "at-spi-": "Accessibility service",
