@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "rajaniraiyn.startup-manager",
+  "name": "Startup Manager",
+  "version": "0.1.0",
+  "author": "Rajaniraiyn",
+  "license": "MIT",
+  "description": "Safely inspect and control systemd units and desktop startup applications without a resident monitoring daemon.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "StartupManager.qml"
+  },
+  "barWidget": {
+    "displayName": "Startup Manager",
+    "description": "Manage optional startup applications and services with protected-unit guardrails.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

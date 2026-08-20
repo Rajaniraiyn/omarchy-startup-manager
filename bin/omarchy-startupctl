@@ -1,0 +1,391 @@
+#!/usr/bin/env python3
+"""Small, on-demand backend for the Omarchy Startup Manager plugin.
+
+There is deliberately no daemon and no polling loop here. The Quickshell panel
+starts this helper only when it is opened, refreshed, or asked to perform an
+action.
+"""
+
+from __future__ import annotations
+
+import argparse
+import configparser
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+from typing import Any
+
+
+SCHEMA_VERSION = 1
+UNIT_RE = re.compile(r"^[-A-Za-z0-9_.@:]+[.](service|socket|timer|path)$")
+MANAGED_MARKER = "X-Omarchy-Startup-Manager"
+
+# Conservative by design: these are desktop/session foundations or recovery
+# mechanisms. The UI explains the lock instead of offering a dangerous button.
+PROTECTED_USER_EXACT = {
+    "dbus.service": "Desktop message bus",
+    "pipewire.service": "Desktop audio foundation",
+    "pipewire-pulse.service": "PulseAudio compatibility layer",
+    "wireplumber.service": "Audio session manager",
+    "xdg-desktop-autostart.target": "Desktop startup target",
+}
+PROTECTED_USER_PREFIXES = {
+    "gnome-keyring-": "Credential storage",
+    "xdg-desktop-portal": "Desktop portal",
+    "uwsm": "Wayland session manager",
+    "omarchy-crash-watch": "Omarchy recovery service",
+    "omarchy-migrate": "Omarchy migration service",
+    "omarchy-recover": "Omarchy recovery service",
+    "omarchy-sleep-lock": "Omarchy lock integration",
+    "omarchy-shell": "Omarchy desktop shell",
+}
+PROTECTED_SYSTEM_EXACT = {
+    "NetworkManager.service": "Network connectivity",
+    "dbus.service": "System message bus",
+    "sddm.service": "Login manager",
+    "systemd-logind.service": "Login and session manager",
+    "systemd-oomd.service": "Out-of-memory protection",
+    "systemd-resolved.service": "DNS resolution",
+    "systemd-timesyncd.service": "Clock synchronization",
+    "thermald.service": "Thermal protection",
+    "ufw.service": "Firewall",
+}
+PROTECTED_SYSTEM_PREFIXES = {
+    "systemd-": "Core operating-system service",
+    "dbus": "System message bus",
+    "getty@": "Login console",
+    "user@": "User session manager",
+    "polkit": "Privilege authorization",
+}
+PROTECTED_AUTOSTART_PREFIXES = {
+    "at-spi-": "Accessibility service",
+    "gnome-keyring-": "Credential storage",
+    "limine-": "Snapshot recovery integration",
+    "org.fcitx.Fcitx5": "Input method",
+    "xdg-user-dirs": "Desktop directory initialization",
+}
+
+
+class StartupCtlError(RuntimeError):
+    pass
+
+
+def emit(payload: dict[str, Any], code: int = 0) -> None:
+    print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+    raise SystemExit(code)
+
+
+def run(command: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
+    try:
+        result = subprocess.run(command, text=True, capture_output=True, check=False)
+    except FileNotFoundError as exc:
+        raise StartupCtlError(f"Required command not found: {command[0]}") from exc
+    if check and result.returncode != 0:
+        message = (result.stderr or result.stdout).strip()
+        raise StartupCtlError(message or f"Command failed: {' '.join(command)}")
+    return result
+
+
+def systemctl_json(scope: str, args: list[str]) -> list[dict[str, Any]]:
+    command = ["systemctl"]
+    if scope == "user":
+        command.append("--user")
+    command.extend(args)
+    result = run(command)
+    raw = result.stdout.strip()
+    return json.loads(raw) if raw else []
+
+
+def protected_reason(scope: str, name: str) -> str:
+    exact = PROTECTED_USER_EXACT if scope == "user" else PROTECTED_SYSTEM_EXACT
+    prefixes = PROTECTED_USER_PREFIXES if scope == "user" else PROTECTED_SYSTEM_PREFIXES
+    if name in exact:
+        return exact[name]
+    for prefix, reason in prefixes.items():
+        if name.startswith(prefix):
+            return reason
+    return ""
+
+
+def memory_for_units(scope: str, names: list[str]) -> dict[str, int]:
+    if not names:
+        return {}
+    command = ["systemctl"]
+    if scope == "user":
+        command.append("--user")
+    command.extend(["show", "--property=Id", "--property=MemoryCurrent", "--"])
+    command.extend(names)
+    result = run(command, check=False)
+    values: dict[str, int] = {}
+    current_id = ""
+    current_memory = 0
+    for line in result.stdout.splitlines() + [""]:
+        if not line:
+            if current_id:
+                values[current_id] = current_memory
+            current_id = ""
+            current_memory = 0
+        elif line.startswith("Id="):
+            current_id = line[3:]
+        elif line.startswith("MemoryCurrent="):
+            value = line.partition("=")[2]
+            current_memory = int(value) if value.isdigit() else 0
+    return values
+
+
+def list_units(scope: str, include_all: bool) -> dict[str, Any]:
+    file_rows = systemctl_json(
+        scope,
+        ["list-unit-files", "--type=service", "--type=socket", "--type=timer", "--type=path", "--no-pager", "--output=json"],
+    )
+    runtime_rows = systemctl_json(
+        scope,
+        ["list-units", "--type=service", "--type=socket", "--type=timer", "--type=path", "--all", "--no-pager", "--output=json"],
+    )
+    runtime = {row.get("unit", ""): row for row in runtime_rows}
+    startup_states = {"enabled", "enabled-runtime", "linked", "linked-runtime", "alias"}
+    candidate_names = [
+        row.get("unit_file", "")
+        for row in file_rows
+        if not str(row.get("unit_file", "")).startswith("app-")
+        and (
+            include_all
+            or row.get("state") in startup_states
+            or runtime.get(row.get("unit_file", ""), {}).get("active") in {"active", "activating", "failed"}
+        )
+    ]
+    active_services = [
+        name for name in candidate_names
+        if runtime.get(name, {}).get("active") in {"active", "activating"} and name.endswith(".service")
+    ]
+    memory = memory_for_units(scope, active_services)
+
+    items: list[dict[str, Any]] = []
+    for file_row in file_rows:
+        name = str(file_row.get("unit_file", ""))
+        if name not in candidate_names:
+            continue
+        live = runtime.get(name, {})
+        file_state = str(file_row.get("state") or "unknown")
+        active = str(live.get("active") or "inactive")
+        reason = protected_reason(scope, name)
+        mutable = file_state in {"enabled", "enabled-runtime", "disabled", "linked", "linked-runtime"}
+        items.append({
+            "id": name,
+            "name": name,
+            "description": str(live.get("description") or ""),
+            "kind": name.rsplit(".", 1)[-1],
+            "scope": scope,
+            "file_state": file_state,
+            "active": active,
+            "sub": str(live.get("sub") or "dead"),
+            "enabled": file_state in {"enabled", "enabled-runtime", "linked", "linked-runtime"},
+            "running": active in {"active", "activating"},
+            "failed": active == "failed",
+            "memory_bytes": memory.get(name, 0),
+            "protected": bool(reason),
+            "protected_reason": reason,
+            "mutable": mutable and not bool(reason),
+        })
+
+    items.sort(key=lambda item: (not item["failed"], not item["running"], item["name"].lower()))
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "scope": scope,
+        "items": items,
+        "summary": {
+            "total": len(items),
+            "running": sum(bool(item["running"]) for item in items),
+            "enabled": sum(bool(item["enabled"]) for item in items),
+            "failed": sum(bool(item["failed"]) for item in items),
+            "protected": sum(bool(item["protected"]) for item in items),
+            "memory_bytes": sum(int(item["memory_bytes"]) for item in items),
+        },
+    }
+
+
+def desktop_name(parser: configparser.ConfigParser, fallback: str) -> str:
+    section = parser["Desktop Entry"] if parser.has_section("Desktop Entry") else {}
+    return str(section.get("Name", fallback))
+
+
+def parse_desktop(path: Path) -> tuple[configparser.ConfigParser, dict[str, Any]]:
+    parser = configparser.ConfigParser(interpolation=None, strict=False)
+    parser.optionxform = str
+    try:
+        parser.read(path, encoding="utf-8")
+    except (OSError, configparser.Error):
+        pass
+    section = parser["Desktop Entry"] if parser.has_section("Desktop Entry") else {}
+    return parser, {
+        "hidden": str(section.get("Hidden", "false")).lower() == "true",
+        "enabled": str(section.get("X-GNOME-Autostart-enabled", "true")).lower() != "false",
+        "description": str(section.get("Comment", "")),
+        "exec": str(section.get("Exec", "")),
+        "managed": str(section.get(MANAGED_MARKER, "false")).lower() == "true",
+    }
+
+
+def autostart_locations() -> tuple[Path, list[Path]]:
+    home = Path.home()
+    user = Path(os.environ.get("XDG_CONFIG_HOME", home / ".config")) / "autostart"
+    raw_dirs = os.environ.get("XDG_CONFIG_DIRS", "/etc/xdg").split(":")
+    system_dirs = [Path(directory) / "autostart" for directory in raw_dirs if directory]
+    return user, system_dirs
+
+
+def list_autostart(_: bool) -> dict[str, Any]:
+    user_dir, system_dirs = autostart_locations()
+    discovered: dict[str, Path] = {}
+    origins: dict[str, str] = {}
+    for directory in system_dirs:
+        if directory.is_dir():
+            for path in sorted(directory.glob("*.desktop")):
+                discovered.setdefault(path.name, path)
+                origins.setdefault(path.name, "system")
+    if user_dir.is_dir():
+        for path in sorted(user_dir.glob("*.desktop")):
+            discovered[path.name] = path
+            origins[path.name] = "user"
+
+    items: list[dict[str, Any]] = []
+    for desktop_id, path in discovered.items():
+        parser, values = parse_desktop(path)
+        reason = ""
+        for prefix, candidate in PROTECTED_AUTOSTART_PREFIXES.items():
+            if desktop_id.startswith(prefix):
+                reason = candidate
+                break
+        hidden = bool(values["hidden"] or not values["enabled"])
+        # We only mutate a system entry by writing/removing our own minimal
+        # user override. Existing user-owned files are never overwritten.
+        mutable = origins[desktop_id] == "system" or bool(values["managed"])
+        items.append({
+            "id": desktop_id,
+            "name": desktop_name(parser, desktop_id.removesuffix(".desktop")),
+            "description": values["description"],
+            "kind": "autostart",
+            "scope": "autostart",
+            "file_state": "disabled" if hidden else "enabled",
+            "active": "unknown",
+            "sub": origins[desktop_id],
+            "enabled": not hidden,
+            "running": False,
+            "failed": False,
+            "memory_bytes": 0,
+            "protected": bool(reason),
+            "protected_reason": reason,
+            "mutable": mutable and not bool(reason),
+            "path": str(path),
+            "exec": values["exec"],
+        })
+    items.sort(key=lambda item: (not item["enabled"], item["name"].lower()))
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "scope": "autostart",
+        "items": items,
+        "summary": {
+            "total": len(items),
+            "running": 0,
+            "enabled": sum(bool(item["enabled"]) for item in items),
+            "failed": 0,
+            "protected": sum(bool(item["protected"]) for item in items),
+            "memory_bytes": 0,
+        },
+    }
+
+
+def ensure_known_unit(scope: str, unit: str) -> None:
+    if not UNIT_RE.fullmatch(unit):
+        raise StartupCtlError("Invalid unit name")
+    rows = systemctl_json(scope, ["list-unit-files", "--no-pager", "--output=json"])
+    if unit not in {row.get("unit_file") for row in rows}:
+        raise StartupCtlError(f"Unknown {scope} unit: {unit}")
+
+
+def act_unit(scope: str, unit: str, action: str) -> str:
+    ensure_known_unit(scope, unit)
+    reason = protected_reason(scope, unit)
+    if reason:
+        raise StartupCtlError(f"Protected unit: {reason}")
+    allowed = {"start", "stop", "restart", "enable", "disable"}
+    if action not in allowed:
+        raise StartupCtlError("Unsupported action")
+    command = ["systemctl"]
+    if scope == "user":
+        command.append("--user")
+    elif scope == "system":
+        command.insert(0, "pkexec")
+    command.extend([action, "--", unit])
+    run(command)
+    return f"{action.capitalize()} completed for {unit}"
+
+
+def act_autostart(desktop_id: str, action: str) -> str:
+    if "/" in desktop_id or not desktop_id.endswith(".desktop"):
+        raise StartupCtlError("Invalid autostart entry")
+    for prefix, reason in PROTECTED_AUTOSTART_PREFIXES.items():
+        if desktop_id.startswith(prefix):
+            raise StartupCtlError(f"Protected entry: {reason}")
+    user_dir, system_dirs = autostart_locations()
+    user_path = user_dir / desktop_id
+    system_path = next((directory / desktop_id for directory in system_dirs if (directory / desktop_id).is_file()), None)
+    if action == "disable":
+        if user_path.exists():
+            _, values = parse_desktop(user_path)
+            if not values["managed"]:
+                raise StartupCtlError("Refusing to overwrite a user-owned autostart file")
+        if system_path is None:
+            raise StartupCtlError("Only system autostart entries can be safely overridden")
+        user_dir.mkdir(parents=True, exist_ok=True)
+        user_path.write_text(f"[Desktop Entry]\\nHidden=true\\n{MANAGED_MARKER}=true\\n", encoding="utf-8")
+        return f"Disabled {desktop_id} for this user"
+    if action == "enable":
+        if not user_path.exists():
+            return f"{desktop_id} is already enabled"
+        _, values = parse_desktop(user_path)
+        if not values["managed"]:
+            raise StartupCtlError("Refusing to modify a user-owned autostart file")
+        user_path.unlink()
+        return f"Enabled {desktop_id} for this user"
+    raise StartupCtlError("Autostart entries support enable and disable only")
+
+
+def command_list(args: argparse.Namespace) -> None:
+    payload = list_autostart(args.all) if args.scope == "autostart" else list_units(args.scope, args.all)
+    emit(payload)
+
+
+def command_action(args: argparse.Namespace) -> None:
+    message = act_autostart(args.unit, args.action) if args.scope == "autostart" else act_unit(args.scope, args.unit, args.action)
+    emit({"schema_version": SCHEMA_VERSION, "ok": True, "message": message})
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="omarchy-startupctl")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    listing = subparsers.add_parser("list", help="Return startup items as JSON")
+    listing.add_argument("--scope", choices=("user", "system", "autostart"), default="user")
+    listing.add_argument("--all", action="store_true", help="Include inactive disabled systemd units")
+    listing.set_defaults(func=command_list)
+    action = subparsers.add_parser("action", help="Perform a validated action")
+    action.add_argument("--scope", choices=("user", "system", "autostart"), required=True)
+    action.add_argument("--unit", required=True)
+    action.add_argument("--action", choices=("start", "stop", "restart", "enable", "disable"), required=True)
+    action.set_defaults(func=command_action)
+    return parser
+
+
+def main() -> None:
+    try:
+        args = build_parser().parse_args()
+        args.func(args)
+    except (StartupCtlError, json.JSONDecodeError, OSError) as exc:
+        emit({"schema_version": SCHEMA_VERSION, "ok": False, "error": str(exc)}, 1)
+
+
+if __name__ == "__main__":
+    main()
