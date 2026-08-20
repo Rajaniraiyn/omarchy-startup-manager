@@ -3,7 +3,6 @@ import QtQuick.Layouts
 import QtQuick.Controls as QQC
 import Quickshell
 import Quickshell.Io
-import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
@@ -221,36 +220,22 @@ Item {
     onTriggered: root.refresh(true)
   }
 
-  PanelWindow {
-    id: panel
+  FloatingWindow {
+    id: window
+    title: "Omarchy Startup Manager"
     visible: root.opened
-    anchors { top: true; bottom: true; left: true; right: true }
-    color: "transparent"
-    exclusionMode: ExclusionMode.Ignore
-    WlrLayershell.namespace: "omarchy-startup-manager"
-    WlrLayershell.layer: WlrLayer.Overlay
-    WlrLayershell.keyboardFocus: root.opened ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
+    color: Color.popups.background
+    implicitWidth: 875
+    implicitHeight: 600
+    minimumSize: Qt.size(680, 500)
 
-    Rectangle {
-      anchors.fill: parent
-      color: Qt.rgba(0, 0, 0, 0.58)
-
-      MouseArea {
-        anchors.fill: parent
-        onClicked: root.dismiss()
-      }
+    onVisibleChanged: {
+      if (!visible && root.opened) root.dismiss()
     }
 
-    BorderSurface {
-      id: card
-      anchors.centerIn: parent
-      width: Math.min(panel.width - Style.space(64), Style.space(760))
-      height: Math.min(panel.height - Style.space(80), Style.space(620))
-      color: Color.popups.background
-      borderSpec: Border.surfaceSpec("popups", "border", Color.popups.border, Math.max(1, Style.space(2)))
-      radius: Style.cornerRadius
-
-      MouseArea { anchors.fill: parent; onClicked: {} }
+    FocusScope {
+      anchors.fill: parent
+      focus: true
 
       PanelKeyCatcher {
         id: keyCatcher
