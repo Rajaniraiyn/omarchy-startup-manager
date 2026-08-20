@@ -37,6 +37,9 @@ Panel {
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property bool busy: listProc.running || actionProc.running
 
+  implicitWidth: button.implicitWidth
+  implicitHeight: button.implicitHeight
+
   function refresh() {
     if (listProc.running || actionProc.running) return
     errorText = ""
