@@ -12,6 +12,7 @@ Panel {
 
   moduleName: "rajaniraiyn.startup-manager"
   ipcTarget: "rajaniraiyn.startup-manager"
+  manageIpc: false
 
   property string scope: "user"
   property var items: []
@@ -131,6 +132,20 @@ Panel {
     } else {
       query = ""
       confirmDialog.opened = false
+    }
+  }
+
+  IpcHandler {
+    target: "rajaniraiyn.startup-manager"
+
+    function open(): void { root.open() }
+    function close(): void { root.close() }
+    function show(): void { root.open() }
+    function hide(): void { root.close() }
+    function toggle(): void { root.toggle() }
+    function refresh(): void { root.refresh(false) }
+    function scope(value: string): void {
+      if (value === "user" || value === "system" || value === "autostart") root.selectScope(value)
     }
   }
 

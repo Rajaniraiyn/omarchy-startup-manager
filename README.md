@@ -48,6 +48,15 @@ bind("SUPER CTRL", "S", "Startup Manager", exec,
 
 Use a key combination that does not conflict with your existing bindings.
 
+The panel also exposes Omarchy-shell IPC for automation:
+
+```bash
+omarchy-shell rajaniraiyn.startup-manager open
+omarchy-shell rajaniraiyn.startup-manager scope system
+omarchy-shell rajaniraiyn.startup-manager refresh
+omarchy-shell rajaniraiyn.startup-manager close
+```
+
 ## Security model
 
 Omarchy plugins run as unsandboxed user code. Review third-party plugins before
