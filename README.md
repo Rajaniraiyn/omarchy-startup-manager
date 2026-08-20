@@ -1,6 +1,6 @@
 # Omarchy Startup Manager
 
-A fast, conservative startup manager for Omarchy 4's Quickshell desktop.
+A fast, conservative, on-demand startup manager for Omarchy 4's Quickshell desktop.
 It shows user services, system services, and XDG login applications in one
 landscape panel, while locking desktop foundations and recovery services
 against accidental changes.
@@ -8,7 +8,7 @@ against accidental changes.
 ## Design
 
 - **Zero resident processes:** state is collected only when the panel opens or
-  you explicitly refresh it.
+  you explicitly refresh it. The panel component itself is unloaded when closed.
 - **Protected foundations:** networking, audio, login, keyring, firewall,
   thermal, recovery, and core systemd units are visible but immutable.
 - **Reversible controls:** starting/stopping is separate from enabling/disabling
@@ -32,29 +32,21 @@ native helper is appropriate if the plugin gains event-driven D-Bus monitoring.
 omarchy plugin add https://github.com/Rajaniraiyn/omarchy-startup-manager.git --enable
 ```
 
-The widget is added to the right side of the Omarchy bar. Move it with the
-normal bar editor or:
+The plugin is an on-demand panel, not a bar widget. Summon it directly with:
 
 ```bash
-omarchy bar move rajaniraiyn.startup-manager --section right
+omarchy-shell shell summon rajaniraiyn.startup-manager '{}'
 ```
 
-Open it from a Hyprland binding without putting it on the bar:
-
-```lua
-bind("SUPER CTRL", "S", "Startup Manager", exec,
-  "omarchy-shell shell toggle rajaniraiyn.startup-manager '{}'")
-```
-
-Use a key combination that does not conflict with your existing bindings.
+It is designed to be exposed as a searchable Omarchy launcher action with
+aliases such as `process manager`, `services`, and `startup apps`.
 
 The panel also exposes Omarchy-shell IPC for automation:
 
 ```bash
-omarchy-shell rajaniraiyn.startup-manager open
-omarchy-shell rajaniraiyn.startup-manager scope system
-omarchy-shell rajaniraiyn.startup-manager refresh
-omarchy-shell rajaniraiyn.startup-manager close
+omarchy-shell shell summon rajaniraiyn.startup-manager '{}'
+omarchy-shell shell summon rajaniraiyn.startup-manager '{"scope":"system"}'
+omarchy-shell shell hide rajaniraiyn.startup-manager
 ```
 
 ## Security model

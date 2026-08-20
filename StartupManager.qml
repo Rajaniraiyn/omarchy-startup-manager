@@ -3,16 +3,17 @@ import QtQuick.Layouts
 import QtQuick.Controls as QQC
 import Quickshell
 import Quickshell.Io
+import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
 
-Panel {
+Item {
   id: root
 
-  moduleName: "rajaniraiyn.startup-manager"
-  ipcTarget: "rajaniraiyn.startup-manager"
-  manageIpc: false
+  property var shell: null
+  property var manifest: null
+  property bool opened: false
 
   property string scope: "user"
   property var items: []
@@ -34,14 +35,30 @@ Panel {
     if (value.indexOf("file://") === 0) value = value.slice(7)
     return decodeURIComponent(value)
   }
-  readonly property color foreground: bar ? bar.foreground : Color.foreground
-  readonly property color urgent: bar ? bar.urgent : Color.urgent
+  readonly property color foreground: Color.popups.text
+  readonly property color urgent: Color.urgent
   readonly property color dim: Qt.darker(foreground, 1.45)
-  readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
+  readonly property string fontFamily: Style.font.family
   readonly property bool busy: loading || actionProc.running
 
-  implicitWidth: button.implicitWidth
-  implicitHeight: button.implicitHeight
+  function open(payloadJson) {
+    var payload = {}
+    try { payload = JSON.parse(payloadJson || "{}") || {} } catch (error) {}
+    if (payload.scope === "user" || payload.scope === "system" || payload.scope === "autostart")
+      scope = payload.scope
+    opened = true
+    Qt.callLater(function() {
+      if (root.opened) keyCatcher.forceActiveFocus()
+    })
+  }
+
+  function close() { opened = false }
+
+  function dismiss() {
+    if (root.shell && typeof root.shell.hide === "function")
+      root.shell.hide((root.manifest && root.manifest.id) || "rajaniraiyn.startup-manager")
+    else close()
+  }
 
   function refresh(clearModel) {
     if (clearModel === undefined) clearModel = false
@@ -135,20 +152,6 @@ Panel {
     }
   }
 
-  IpcHandler {
-    target: "rajaniraiyn.startup-manager"
-
-    function open(): void { root.open() }
-    function close(): void { root.close() }
-    function show(): void { root.open() }
-    function hide(): void { root.close() }
-    function toggle(): void { root.toggle() }
-    function refresh(): void { root.refresh(false) }
-    function scope(value: string): void {
-      if (value === "user" || value === "system" || value === "autostart") root.selectScope(value)
-    }
-  }
-
   Process {
     id: listProc
     property string requestScope: ""
@@ -218,54 +221,62 @@ Panel {
     onTriggered: root.refresh(true)
   }
 
-  BarIconButton {
-    id: button
-    anchors.fill: parent
-    bar: root.bar
-    text: "󰒓"
-    tooltipText: "Startup Manager"
-    onPressed: function(mouseButton) {
-      if (mouseButton === Qt.RightButton && root.opened) root.refresh(false)
-      else root.toggle()
-    }
-  }
-
-  KeyboardPanel {
+  PanelWindow {
     id: panel
-    anchorItem: button
-    owner: root
-    bar: root.bar
-    open: root.opened
-    focusTarget: keyCatcher
-    centerOnBar: true
-    contentWidth: panel.fittedContentWidth(Style.space(720))
-    contentHeight: panel.cappedContentHeight(Style.space(560))
+    visible: root.opened
+    anchors { top: true; bottom: true; left: true; right: true }
+    color: "transparent"
+    exclusionMode: ExclusionMode.Ignore
+    WlrLayershell.namespace: "omarchy-startup-manager"
+    WlrLayershell.layer: WlrLayer.Overlay
+    WlrLayershell.keyboardFocus: root.opened ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
 
-    PanelKeyCatcher {
-      id: keyCatcher
+    Rectangle {
       anchors.fill: parent
-      blocked: searchField.activeFocus || confirmDialog.opened
-      onMoveRequested: function(dx, dy) {
-        if (dy !== 0) root.moveSelection(dy)
-        else if (dx < 0) {
-          if (root.scope === "system") root.selectScope("user")
-          else if (root.scope === "autostart") root.selectScope("system")
-        } else if (dx > 0) {
-          if (root.scope === "user") root.selectScope("system")
-          else if (root.scope === "system") root.selectScope("autostart")
-        }
+      color: Qt.rgba(0, 0, 0, 0.58)
+
+      MouseArea {
+        anchors.fill: parent
+        onClicked: root.dismiss()
       }
-      onActivateRequested: root.defaultAction(root.selectedItem())
-      onCloseRequested: root.close()
-      onTabRequested: function(direction) { root.switchPanel(direction) }
-      onTextKey: function(text) {
-        if (text === "/") searchField.forceActiveFocus()
-        else if (text === "r" || text === "R") root.refresh(false)
-        else if (text === "a" || text === "A") {
-          root.includeAll = !root.includeAll
-          root.refresh(true)
+    }
+
+    BorderSurface {
+      id: card
+      anchors.centerIn: parent
+      width: Math.min(panel.width - Style.space(64), Style.space(760))
+      height: Math.min(panel.height - Style.space(80), Style.space(620))
+      color: Color.popups.background
+      borderSpec: Border.surfaceSpec("popups", "border", Color.popups.border, Math.max(1, Style.space(2)))
+      radius: Style.cornerRadius
+
+      MouseArea { anchors.fill: parent; onClicked: {} }
+
+      PanelKeyCatcher {
+        id: keyCatcher
+        anchors.fill: parent
+        anchors.margins: Style.spacing.popupPadding
+        blocked: searchField.activeFocus || confirmDialog.opened
+        onMoveRequested: function(dx, dy) {
+          if (dy !== 0) root.moveSelection(dy)
+          else if (dx < 0) {
+            if (root.scope === "system") root.selectScope("user")
+            else if (root.scope === "autostart") root.selectScope("system")
+          } else if (dx > 0) {
+            if (root.scope === "user") root.selectScope("system")
+            else if (root.scope === "system") root.selectScope("autostart")
+          }
         }
-      }
+        onActivateRequested: root.defaultAction(root.selectedItem())
+        onCloseRequested: root.dismiss()
+        onTextKey: function(text) {
+          if (text === "/") searchField.forceActiveFocus()
+          else if (text === "r" || text === "R") root.refresh(false)
+          else if (text === "a" || text === "A") {
+            root.includeAll = !root.includeAll
+            root.refresh(true)
+          }
+        }
 
       Column {
         anchors.fill: parent
@@ -555,26 +566,27 @@ Panel {
         }
       }
 
-      ConfirmDialog {
-        id: confirmDialog
-        anchors.fill: parent
-        foreground: root.foreground
-        message: root.pendingItem
-          ? Model.actionLabel(root.pendingAction) + " for " + root.pendingItem.name + "?\n\n"
-            + (root.pendingAction === "disable"
-               ? "It will remain available, but will not start automatically."
-               : root.pendingAction === "stop"
-                 ? "It can be started again without logging out."
-                 : "This changes the current system state.")
-          : ""
-        confirmText: Model.actionLabel(root.pendingAction)
-        onCanceled: {
-          opened = false
-          root.pendingItem = null
-          root.pendingAction = ""
-          keyCatcher.forceActiveFocus()
+        ConfirmDialog {
+          id: confirmDialog
+          anchors.fill: parent
+          foreground: root.foreground
+          message: root.pendingItem
+            ? Model.actionLabel(root.pendingAction) + " for " + root.pendingItem.name + "?\n\n"
+              + (root.pendingAction === "disable"
+                 ? "It will remain available, but will not start automatically."
+                 : root.pendingAction === "stop"
+                   ? "It can be started again without logging out."
+                   : "This changes the current system state.")
+            : ""
+          confirmText: Model.actionLabel(root.pendingAction)
+          onCanceled: {
+            opened = false
+            root.pendingItem = null
+            root.pendingAction = ""
+            keyCatcher.forceActiveFocus()
+          }
+          onConfirmed: root.runPendingAction()
         }
-        onConfirmed: root.runPendingAction()
       }
     }
   }
