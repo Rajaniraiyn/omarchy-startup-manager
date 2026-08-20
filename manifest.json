@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "rajaniraiyn.startup-manager",
   "name": "Startup Manager",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "Rajaniraiyn",
   "license": "MIT",
   "description": "Safely inspect and control systemd units and desktop startup applications without a resident monitoring daemon.",
