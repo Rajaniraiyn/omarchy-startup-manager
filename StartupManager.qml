@@ -24,6 +24,8 @@ Panel {
   property bool cursorActive: false
   property var pendingItem: null
   property string pendingAction: ""
+  property bool loading: false
+  property bool refreshQueued: false
 
   readonly property var visibleItems: Model.filtered(items, query)
   readonly property string helperPath: {
@@ -35,17 +37,33 @@ Panel {
   readonly property color urgent: bar ? bar.urgent : Color.urgent
   readonly property color dim: Qt.darker(foreground, 1.45)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
-  readonly property bool busy: listProc.running || actionProc.running
+  readonly property bool busy: loading || actionProc.running
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
-  function refresh() {
-    if (listProc.running || actionProc.running) return
+  function refresh(clearModel) {
+    if (clearModel === undefined) clearModel = false
+    if (actionProc.running) return
+    if (clearModel) {
+      items = []
+      summary = ({})
+      selectedIndex = 0
+      cursorActive = false
+    }
+    loading = true
     errorText = ""
     noticeText = ""
+    if (listProc.running) {
+      refreshQueued = true
+      return
+    }
     var command = [helperPath, "list", "--scope", scope]
     if (includeAll && scope !== "autostart") command.push("--all")
+    listProc.requestScope = scope
+    listProc.requestIncludeAll = includeAll
+    listProc.resultText = ""
+    listProc.errorResult = ""
     listProc.command = command
     listProc.running = true
   }
@@ -64,11 +82,9 @@ Panel {
   }
 
   function selectScope(nextScope) {
-    if (scope === nextScope || busy) return
+    if (scope === nextScope) return
     scope = nextScope
-    selectedIndex = 0
-    cursorActive = false
-    refresh()
+    refresh(true)
   }
 
   function requestAction(item, action) {
@@ -104,21 +120,14 @@ Panel {
     if (visibleItems.length === 0) return
     cursorActive = true
     selectedIndex = Math.max(0, Math.min(visibleItems.length - 1, selectedIndex + delta))
-    Qt.callLater(function() {
-      var child = rowsRepeater.itemAt(selectedIndex)
-      var flick = listView.contentItem
-      if (!child || !flick) return
-      if (child.y < flick.contentY) flick.contentY = child.y
-      else if (child.y + child.height > flick.contentY + flick.height)
-        flick.contentY = child.y + child.height - flick.height
-    })
+    listView.positionViewAtIndex(selectedIndex, ListView.Contain)
   }
 
   onOpenedChanged: {
     if (opened) {
       cursorActive = false
       selectedIndex = 0
-      refresh()
+      refresh(true)
     } else {
       query = ""
       confirmDialog.opened = false
@@ -127,16 +136,34 @@ Panel {
 
   Process {
     id: listProc
+    property string requestScope: ""
+    property bool requestIncludeAll: false
+    property string resultText: ""
+    property string errorResult: ""
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.updatePayload(text)
+      onStreamFinished: listProc.resultText = text
     }
     stderr: StdioCollector {
       waitForEnd: true
-      onStreamFinished: if (text.trim() !== "") root.errorText = text.trim()
+      onStreamFinished: listProc.errorResult = text.trim()
     }
     onExited: function(code) {
-      if (code !== 0 && root.errorText === "") root.errorText = "Startup helper exited with code " + code
+      var currentRequest = listProc.requestScope === root.scope
+        && listProc.requestIncludeAll === root.includeAll
+      if (currentRequest) {
+        if (code === 0) root.updatePayload(listProc.resultText)
+        else root.errorText = listProc.errorResult !== ""
+          ? listProc.errorResult
+          : "Startup helper exited with code " + code
+        root.loading = false
+      }
+      listProc.resultText = ""
+      listProc.errorResult = ""
+      if (root.refreshQueued || !currentRequest) {
+        root.refreshQueued = false
+        Qt.callLater(function() { root.refresh(false) })
+      }
     }
   }
 
@@ -173,7 +200,7 @@ Panel {
   Timer {
     id: refreshDelay
     interval: 250
-    onTriggered: root.refresh()
+    onTriggered: root.refresh(true)
   }
 
   BarIconButton {
@@ -183,7 +210,7 @@ Panel {
     text: root.busy ? "󰑓" : "󰒓"
     tooltipText: "Startup Manager"
     onPressed: function(mouseButton) {
-      if (mouseButton === Qt.RightButton && root.opened) root.refresh()
+      if (mouseButton === Qt.RightButton && root.opened) root.refresh(false)
       else root.toggle()
     }
   }
@@ -218,10 +245,10 @@ Panel {
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(text) {
         if (text === "/") searchField.forceActiveFocus()
-        else if (text === "r" || text === "R") root.refresh()
+        else if (text === "r" || text === "R") root.refresh(false)
         else if (text === "a" || text === "A") {
           root.includeAll = !root.includeAll
-          root.refresh()
+          root.refresh(true)
         }
       }
 
@@ -229,49 +256,44 @@ Panel {
         anchors.fill: parent
         spacing: Style.space(12)
 
-        RowLayout {
+        Item {
+          id: header
           width: parent.width
-          spacing: Style.space(12)
+          implicitHeight: hero.implicitHeight
+          readonly property bool loading: root.loading
+          function refreshPanel() { root.refresh(false) }
 
-          Text {
-            text: "󰒓"
-            color: root.foreground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.display
-          }
-
-          ColumnLayout {
-            Layout.fillWidth: true
-            spacing: Style.space(1)
-            Text {
-              text: "Startup Manager"
-              color: root.foreground
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.title
-              font.bold: true
-            }
-            Text {
-              text: root.busy
-                ? "READING SYSTEM STATE"
-                : ((root.summary.running || 0) + " RUNNING  ·  "
-                   + (root.summary.enabled || 0) + " ENABLED  ·  "
-                   + (root.summary.protected || 0) + " PROTECTED")
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              font.bold: true
-              font.letterSpacing: 1.0
-            }
-          }
-
-          Button {
-            iconText: "󰑐"
-            tooltipText: "Refresh (R)"
+          PanelHero {
+            id: hero
+            width: parent.width
+            title: "Startup Manager"
+            meta: root.loading
+              ? "Reading " + (root.scope === "autostart" ? "login applications" : root.scope + " services")
+              : ((root.summary.running || 0) + " running  ·  "
+                 + (root.summary.enabled || 0) + " enabled  ·  "
+                 + (root.summary.protected || 0) + " protected")
             foreground: root.foreground
             fontFamily: root.fontFamily
-            bordered: true
-            enabled: !root.busy
-            onClicked: root.refresh()
+            iconComponent: Component {
+              Text {
+                text: "󰒓"
+                color: hero.foreground
+                font.family: hero.fontFamily
+                font.pixelSize: Style.font.display
+              }
+            }
+            trailingControl: Component {
+              Button {
+                iconText: "󰦖"
+                iconSpinning: header.loading
+                tooltipText: header.loading ? "Reading system state" : "Refresh (R)"
+                foreground: hero.foreground
+                fontFamily: hero.fontFamily
+                bordered: true
+                enabled: !header.loading && !actionProc.running
+                onClicked: header.refreshPanel()
+              }
+            }
           }
         }
 
@@ -279,21 +301,17 @@ Panel {
           width: parent.width
           spacing: Style.space(8)
 
-          Repeater {
-            model: [
-              { id: "user", label: "User services" },
-              { id: "system", label: "System services" },
-              { id: "autostart", label: "Login apps" }
+          ButtonGroup {
+            options: [
+              { value: "user", label: "User services" },
+              { value: "system", label: "System services" },
+              { value: "autostart", label: "Login apps" }
             ]
-            Button {
-              required property var modelData
-              text: modelData.label
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-              selected: root.scope === modelData.id
-              bordered: true
-              onClicked: root.selectScope(modelData.id)
-            }
+            value: root.scope
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            focusable: false
+            onChanged: function(value) { root.selectScope(value) }
           }
 
           Item { Layout.fillWidth: true }
@@ -308,7 +326,7 @@ Panel {
             bordered: true
             onClicked: {
               root.includeAll = !root.includeAll
-              root.refresh()
+              root.refresh(true)
             }
           }
         }
@@ -356,38 +374,26 @@ Panel {
           }
         }
 
-        QQC.ScrollView {
-          id: listView
+        Item {
+          id: listArea
           width: parent.width
           height: Math.max(0, parent.height - y)
-          clip: true
-          QQC.ScrollBar.horizontal.policy: QQC.ScrollBar.AlwaysOff
-          QQC.ScrollBar.vertical.policy: QQC.ScrollBar.AsNeeded
 
-          Column {
-            id: rowsColumn
-            width: listView.availableWidth
+          ListView {
+            id: listView
+            anchors.fill: parent
+            visible: !root.loading
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
             spacing: Style.space(4)
+            model: root.visibleItems
+            keyNavigationEnabled: false
+            QQC.ScrollBar.vertical: QQC.ScrollBar { policy: QQC.ScrollBar.AsNeeded }
 
-            Text {
-              visible: !root.busy && root.visibleItems.length === 0
-              width: parent.width
-              topPadding: Style.space(48)
-              text: root.query === "" ? "No startup items in this view" : "No matching startup items"
-              horizontalAlignment: Text.AlignHCenter
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.body
-            }
-
-            Repeater {
-              id: rowsRepeater
-              model: root.visibleItems
-
-              CursorSurface {
+            delegate: CursorSurface {
                 required property var modelData
                 required property int index
-                width: rowsColumn.width
+                width: listView.width
                 implicitHeight: Style.space(62)
                 hasCursor: root.cursorActive && root.selectedIndex === index
                 foreground: root.foreground
@@ -480,8 +486,45 @@ Panel {
                     }
                   }
                 }
+            }
+          }
+
+          Column {
+            anchors.centerIn: parent
+            visible: root.loading
+            spacing: Style.space(12)
+
+            Text {
+              anchors.horizontalCenter: parent.horizontalCenter
+              text: "󰦖"
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.display
+              RotationAnimator on rotation {
+                running: root.loading
+                from: 0
+                to: 360
+                duration: 800
+                loops: Animation.Infinite
               }
             }
+
+            Text {
+              anchors.horizontalCenter: parent.horizontalCenter
+              text: "Loading " + (root.scope === "autostart" ? "login applications" : root.scope + " services") + "…"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+            }
+          }
+
+          Text {
+            anchors.centerIn: parent
+            visible: !root.loading && root.visibleItems.length === 0
+            text: root.query === "" ? "No startup items in this view" : "No matching startup items"
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
           }
         }
       }
