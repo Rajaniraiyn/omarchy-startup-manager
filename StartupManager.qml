@@ -222,7 +222,7 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: root.busy ? "󰑓" : "󰒓"
+    text: "󰒓"
     tooltipText: "Startup Manager"
     onPressed: function(mouseButton) {
       if (mouseButton === Qt.RightButton && root.opened) root.refresh(false)
@@ -299,7 +299,7 @@ Panel {
             }
             trailingControl: Component {
               Button {
-                iconText: "󰦖"
+                iconText: "󰑐"
                 iconSpinning: header.loading
                 tooltipText: header.loading ? "Reading system state" : "Refresh (R)"
                 foreground: hero.foreground
@@ -509,18 +509,29 @@ Panel {
             visible: root.loading
             spacing: Style.space(12)
 
-            Text {
+            Row {
               anchors.horizontalCenter: parent.horizontalCenter
-              text: "󰦖"
-              color: root.foreground
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.display
-              RotationAnimator on rotation {
-                running: root.loading
-                from: 0
-                to: 360
-                duration: 800
-                loops: Animation.Infinite
+              spacing: Style.space(7)
+
+              Repeater {
+                model: 3
+
+                Rectangle {
+                  required property int index
+                  width: Style.space(7)
+                  height: width
+                  radius: width / 2
+                  color: root.foreground
+
+                  SequentialAnimation on opacity {
+                    running: root.loading
+                    loops: Animation.Infinite
+                    PauseAnimation { duration: index * 120 }
+                    NumberAnimation { from: 0.25; to: 1.0; duration: 220; easing.type: Easing.OutCubic }
+                    NumberAnimation { from: 1.0; to: 0.25; duration: 360; easing.type: Easing.InCubic }
+                    PauseAnimation { duration: (2 - index) * 120 }
+                  }
+                }
               }
             }
 
